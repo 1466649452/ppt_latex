@@ -1,0 +1,231 @@
+Option Explicit
+
+' ==============================================================================
+' LaTeX 清洗工具（PPT 原生公式专用 · 终版）
+' 功能：
+' 1. 自动修复 \arctan\frac -> \arctan{\frac...}
+' 2. bmatrix -> \left[\begin{matrix}
+' 3. 移除 align / label / 换行
+' 4. 在 _ ^ 前加空格，参数结束后加空格（PPT 关键）
+' ==============================================================================
+
+Sub PasteLatex(control As IRibbonControl)
+
+    Dim rawLatex As String
+    Dim cleanLatex As String
+    Dim txtRange As TextRange
+
+    ' 1. 获取输入
+    If ActiveWindow.Selection.Type = ppSelectionText Then
+        rawLatex = ActiveWindow.Selection.TextRange.Text
+    ElseIf ActiveWindow.Selection.Type = ppSelectionShapes Then
+        If ActiveWindow.Selection.ShapeRange.HasTextFrame Then
+            rawLatex = ActiveWindow.Selection.ShapeRange.TextFrame.TextRange.Text
+        End If
+    End If
+
+    If Trim(rawLatex) = "" Then
+        rawLatex = InputBox("请输入 LaTeX：", "LaTeX 清洗（终版）")
+    End If
+    If Trim(rawLatex) = "" Then Exit Sub
+
+    ' 2. 清洗
+    cleanLatex = CleanForPPT(rawLatex)
+
+    ' 3. 插入公式
+    Application.CommandBars.ExecuteMso ("EquationInsertNew")
+
+    ' 4. 写入
+    If ActiveWindow.Selection.Type = ppSelectionShapes Then
+        Set txtRange = ActiveWindow.Selection.ShapeRange.TextFrame.TextRange
+    ElseIf ActiveWindow.Selection.Type = ppSelectionText Then
+        Set txtRange = ActiveWindow.Selection.TextRange
+    End If
+
+    If Not txtRange Is Nothing Then
+        txtRange.Text = cleanLatex
+        txtRange.Select
+        ' 写入后请手动点击：公式 → 转换 → LaTeX
+    End If
+End Sub
+
+' ==============================================================================
+' 主清洗流程
+' ==============================================================================
+Function CleanForPPT(ByVal str As String) As String
+    Dim result As String
+    result = str
+
+    ' 1. 单行化
+    result = Replace(result, vbCrLf, " ")
+    result = Replace(result, vbCr, " ")
+    result = Replace(result, vbLf, " ")
+    result = Replace(result, vbTab, "")
+
+    ' 2. 移除 align / label
+    result = Replace(result, "\begin{align}", "")
+    result = Replace(result, "\end{align}", "")
+    result = RemoveLabel(result)
+
+    ' 3. 修复三角函数 + 分数
+    result = FixTrigFrac(result, "\arctan")
+    result = FixTrigFrac(result, "\sin")
+    result = FixTrigFrac(result, "\cos")
+    result = FixTrigFrac(result, "\tan")
+
+    ' 4. 矩阵标准化
+    If InStr(result, "\begin{bmatrix}") > 0 Then
+        result = Replace(result, "\begin{bmatrix}", "\left[\begin{matrix}")
+        result = Replace(result, "\end{bmatrix}", "\end{matrix}\right]")
+    End If
+
+    ' 5. 下标 / 上标空格规则（核心）
+    result = FixSubSupSpace_Prefix(result)
+
+    ' 6. 压缩空格
+    result = Trim(result)
+    Do While InStr(result, "  ") > 0
+        result = Replace(result, "  ", " ")
+    Loop
+
+    CleanForPPT = result
+End Function
+
+' ==============================================================================
+' 修复 \arctan\frac -> \arctan{\frac...}
+' ==============================================================================
+Function FixTrigFrac(ByVal txt As String, ByVal cmd As String) As String
+    Dim pos As Long, searchStart As Long
+    Dim fracPos As Long, i As Long
+    Dim braceCount As Long, argCount As Long
+    Dim fracEnd As Long
+
+    searchStart = 1
+
+    Do
+        pos = InStr(searchStart, txt, cmd)
+        If pos = 0 Then Exit Do
+
+        fracPos = 0
+        For i = pos + Len(cmd) To Len(txt)
+            If Mid(txt, i, 1) <> " " Then
+                If Mid(txt, i, 5) = "\frac" Then fracPos = i
+                Exit For
+            End If
+        Next i
+
+        If fracPos > 0 Then
+            argCount = 0
+            braceCount = 0
+            fracEnd = 0
+
+            For i = fracPos + 5 To Len(txt)
+                If Mid(txt, i, 1) = "{" Then
+                    If braceCount = 0 Then argCount = argCount + 1
+                    braceCount = braceCount + 1
+                ElseIf Mid(txt, i, 1) = "}" Then
+                    braceCount = braceCount - 1
+                    If braceCount = 0 And argCount = 2 Then
+                        fracEnd = i
+                        Exit For
+                    End If
+                End If
+            Next i
+
+            If fracEnd > 0 Then
+                txt = Left(txt, fracPos - 1) & "{" & _
+                      Mid(txt, fracPos, fracEnd - fracPos + 1) & "}" & _
+                      Mid(txt, fracEnd + 1)
+                searchStart = fracEnd + 2
+            Else
+                searchStart = pos + 1
+            End If
+        Else
+            searchStart = pos + 1
+        End If
+    Loop
+
+    FixTrigFrac = txt
+End Function
+
+' ==============================================================================
+' 在 _ 和 ^ 前加空格，并在参数结束后加空格
+' ==============================================================================
+Function FixSubSupSpace_Prefix(ByVal txt As String) As String
+    Dim i As Long, j As Long
+    Dim result As String, ch As String
+    Dim braceCount As Long
+
+    i = 1
+    result = ""
+
+    Do While i <= Len(txt)
+        ch = Mid(txt, i, 1)
+
+        If ch = "_" Or ch = "^" Then
+            If Len(result) > 0 Then
+                If Right(result, 1) <> " " Then result = result & " "
+            End If
+
+            result = result & ch
+
+            If i + 1 <= Len(txt) Then
+                If Mid(txt, i + 1, 1) = "{" Then
+                    braceCount = 0
+                    For j = i + 1 To Len(txt)
+                        result = result & Mid(txt, j, 1)
+                        If Mid(txt, j, 1) = "{" Then braceCount = braceCount + 1
+                        If Mid(txt, j, 1) = "}" Then braceCount = braceCount - 1
+                        If braceCount = 0 Then Exit For
+                    Next j
+                    result = result & " "
+                    i = j + 1
+                Else
+                    result = result & Mid(txt, i + 1, 1) & " "
+                    i = i + 2
+                End If
+            Else
+                i = i + 1
+            End If
+        Else
+            result = result & ch
+            i = i + 1
+        End If
+    Loop
+
+    FixSubSupSpace_Prefix = result
+End Function
+
+' ==============================================================================
+' 删除 \label{...}
+' ==============================================================================
+Function RemoveLabel(ByVal txt As String) As String
+    Dim pos As Long, sBrace As Long, eBrace As Long
+    Dim bCount As Long, i As Long
+
+    Do
+        pos = InStr(txt, "\label{")
+        If pos = 0 Then Exit Do
+
+        sBrace = pos + 6
+        bCount = 1
+        eBrace = 0
+
+        For i = sBrace + 1 To Len(txt)
+            If Mid(txt, i, 1) = "{" Then bCount = bCount + 1
+            If Mid(txt, i, 1) = "}" Then bCount = bCount - 1
+            If bCount = 0 Then
+                eBrace = i
+                Exit For
+            End If
+        Next i
+
+        If eBrace > 0 Then
+            txt = Left(txt, pos - 1) & Mid(txt, eBrace + 1)
+        Else
+            Exit Do
+        End If
+    Loop
+
+    RemoveLabel = txt
+End Function
